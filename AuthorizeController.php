@@ -16,7 +16,6 @@ class AuthorizeController extends AppController
 
     public function index()
     {
-        // Disable the default CakePHP view rendering so we can echo HTML directly
         $this->autoRender = false;
         $this->response->type('html');
 
@@ -36,8 +35,6 @@ class AuthorizeController extends AppController
             die("Error: Missing client_id or redirect_uri.");
         }
 
-        // --- START SECURITY FIX: Validate Redirect URI ---
-
         // Lookup the client in the database
         $clientDb = $this->Oauthclient->find('first', array(
             'conditions' => array('client_id' => $clientId),
@@ -50,9 +47,6 @@ class AuthorizeController extends AppController
             die("Invalid Client Application");
         }
 
-        // NetSapiens stores the URI in 'redirect_uri'.
-        // Note: Check your specific DB schema if this key differs,
-        // but it aligns with the 'createClient' method in the original file.
         $registeredUri = isset($clientDb['Oauthclient']['redirect_uri']) ?
                          $clientDb['Oauthclient']['redirect_uri'] : null;
 
@@ -64,9 +58,6 @@ class AuthorizeController extends AppController
                 die("Error: The redirect_uri provided does not match the registered URI for this client.");
             }
         }
-        // If $registeredUri is empty/null in the DB, you might choose to
-        // allow the URL argument (Development mode) or block it (Strict Production).
-        // I recommend blocking it if possible:
         else {
              die("Error: No redirect URI is registered for this client.");
         }
@@ -92,7 +83,6 @@ class AuthorizeController extends AppController
                 );
 
                 // Cache the code (Required by Oauth2Controller logic)
-                // Note: The key is the lowercased username.
                 Cache::config('_auth_code_', array('duration' => Configure::read('NsAuthCodeExpire')));
                 Cache::write(strtolower($params['username']), $authCode, '_auth_code_');
 
@@ -103,7 +93,6 @@ class AuthorizeController extends AppController
                     'state' => $state
                 ]);
 
-                // Handle existing query params in redirect_uri
                 $separator = (strpos($redirectUri, '?') === false) ? '?' : '&';
                 $callbackUrl = $redirectUri . $separator . $queryStr;
 
@@ -117,7 +106,6 @@ class AuthorizeController extends AppController
         }
 
         // 4. RENDER LOGIN FORM (GET or Failed POST)
-        // We echo HTML directly to avoid creating a .ctp file in the View folder
         ?>
         <!DOCTYPE html>
         <html>
