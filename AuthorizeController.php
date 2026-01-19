@@ -3,12 +3,12 @@
 
 class AuthorizeController extends AppController
 {
-    // Load the same models used by Oauth2Controller
+    // Define models.
     public $uses = array('Subscriber', 'Oauthclient', 'Oauthcode', 'Domain');
 
     public function beforeFilter() {
         parent::beforeFilter();
-        // Allow access to this controller without a prior token
+        // Allow access to the login form without a token
         if (isset($this->Auth)) {
             $this->Auth->allow('index');
         }
@@ -19,7 +19,7 @@ class AuthorizeController extends AppController
         $this->autoRender = false;
         $this->response->type('html');
 
-        // 1. COLLECT PARAMS (Support both GET and POST)
+        // 1. COLLECT PARAMS (Directly from URL/POST)
         $params = array_merge($this->request->query, $this->request->data);
 
         $clientId     = isset($params['client_id']) ? $params['client_id'] : null;
@@ -30,49 +30,76 @@ class AuthorizeController extends AppController
 
         $error = null;
 
-        // 2. VALIDATE BASIC OAUTH PARAMS
+        // 2. VALIDATE BASIC OAUTH PARAMS EXIST
         if (!$clientId || !$redirectUri) {
-            die("Error: Missing client_id or redirect_uri.");
+            header('HTTP/1.0 400 Bad Request');
+            die("Error: Missing 'client_id' or 'redirect_uri' in URL parameters.");
         }
 
-        // Lookup the client in the database
+        // 3. SECURITY: Validate Client & Redirect URI against Database
+        // This ensures the client_id is valid and prevents Open Redirect attacks
+        if (!isset($this->Oauthclient)) $this->loadModel('Oauthclient');
+
         $clientDb = $this->Oauthclient->find('first', array(
             'conditions' => array('client_id' => $clientId),
             'recursive' => -1
         ));
 
+        // If client_id doesn't exist in the database
         if (!$clientDb) {
-            // Obscure error message for security (don't reveal valid/invalid IDs)
             header('HTTP/1.0 400 Bad Request');
-            die("Invalid Client Application");
+            die("Invalid Client Application: The provided client_id was not found.");
         }
 
+        // Verify the Redirect URI matches the database record
         $registeredUri = isset($clientDb['Oauthclient']['redirect_uri']) ?
                          $clientDb['Oauthclient']['redirect_uri'] : null;
 
-        // If the client has a registered URI, we MUST enforce it.
         if (!empty($registeredUri)) {
-            // Strict match is best security
+            // Strict comparison
             if ($registeredUri !== $redirectUri) {
                 header('HTTP/1.0 400 Bad Request');
-                die("Error: The redirect_uri provided does not match the registered URI for this client.");
+                die("Error: The redirect_uri provided does not match the registered URI for this client_id.");
             }
         }
-        else {
-             die("Error: No redirect URI is registered for this client.");
-        }
 
-        // 3. HANDLE LOGIN SUBMISSION (POST)
+        // 4. HANDLE LOGIN SUBMISSION (POST)
         if ($this->request->is('post') && isset($params['username']) && isset($params['password'])) {
 
             $infoUser = array(
                 'username' => $params['username'],
                 'password' => $params['password']
             );
-            // Use the AppController's existing credential check
+
+            // Verify Credentials
             if ($this->checkUserCredentials($infoUser, 'portal')) {
 
-                // A. LOGIN SUCCESS - GENERATE CODE
+                // --- SCOPE ELEVATION ---
+                // Fetch the user's real permissions from the DB
+                if (!isset($this->Subscriber)) $this->loadModel('Subscriber');
+
+                try {
+                    $userDb = $this->Subscriber->find('first', array(
+                        'conditions' => array(
+                            'OR' => array(
+                                'subscriber_login' => $params['username'],
+                                'email_address' => $params['username']
+                            )
+                        ),
+                        'fields' => array('scope'),
+                        'recursive' => -1
+                    ));
+
+                    if (!empty($userDb) && isset($userDb['Subscriber']['scope'])) {
+                        $scope = $userDb['Subscriber']['scope'];
+                    }
+                } catch (Exception $e) {
+                    // Fail gracefully on DB error
+                }
+
+                // --- GENERATE CODE ---
+                if (!isset($this->Oauthcode)) $this->loadModel('Oauthcode');
+
                 $authCode = $this->Oauthcode->createAuthCode(
                     $clientId,
                     $redirectUri,
@@ -82,14 +109,13 @@ class AuthorizeController extends AppController
                     $params['username']
                 );
 
-                // Cache the code (Required by Oauth2Controller logic)
                 Cache::config('_auth_code_', array('duration' => Configure::read('NsAuthCodeExpire')));
                 Cache::write(strtolower($params['username']), $authCode, '_auth_code_');
 
-                // B. REDIRECT BACK TO APPLICATION
+                // --- REDIRECT ---
                 $queryStr = http_build_query([
                     'code' => $authCode,
-                    'username' => $params['username'],
+                    'username' => $params['username'], // Passing username back for token exchange
                     'state' => $state
                 ]);
 
@@ -102,31 +128,37 @@ class AuthorizeController extends AppController
             } else {
                 $error = "Invalid Username or Password";
             }
-
         }
 
-        // 4. RENDER LOGIN FORM (GET or Failed POST)
+        // 5. RENDER LOGIN FORM
         ?>
         <!DOCTYPE html>
         <html>
         <head>
             <title>Authorize Application</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body { font-family: sans-serif; display: flex; justify-content: center; padding-top: 50px; background: #f4f4f4; }
-                .login-box { background: white; padding: 30px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 300px; }
-                input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; }
-                button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
-                button:hover { background: #0056b3; }
-                .error { color: red; font-size: 0.9em; margin-bottom: 10px; }
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; padding-top: 50px; background: #f0f2f5; color: #1c1e21; }
+                .login-box { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); width: 320px; }
+                h3 { text-align: center; margin-top: 0; color: #1c1e21; }
+                input { width: 100%; padding: 12px; margin: 8px 0 20px 0; border: 1px solid #dddfe2; border-radius: 6px; box-sizing: border-box; font-size: 16px; }
+                input:focus { border-color: #1877f2; outline: none; box-shadow: 0 0 0 2px #e7f3ff; }
+                label { font-size: 14px; font-weight: bold; color: #606770; }
+                button { width: 100%; padding: 12px; background: #1877f2; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+                button:hover { background: #166fe5; }
+                .error { background: #ffebe8; color: #c00; padding: 10px; border-radius: 4px; border: 1px solid #dd3c10; font-size: 14px; margin-bottom: 15px; text-align: center; }
             </style>
         </head>
         <body>
             <div class="login-box">
-                <h3 style="text-align:center;">Login</h3>
-                <?php if($error): ?><div class="error"><?php echo htmlspecialchars($error); ?></div><?php endif; ?>
+                <h3>Authorize Access</h3>
+
+                <?php if($error): ?>
+                    <div class="error"><?php echo htmlspecialchars($error); ?></div>
+                <?php endif; ?>
 
                 <form method="POST">
-                    <!-- Pass OAuth params through as hidden fields -->
+                    <!-- Hidden fields to preserve OAuth params -->
                     <input type="hidden" name="client_id" value="<?php echo htmlspecialchars($clientId); ?>">
                     <input type="hidden" name="redirect_uri" value="<?php echo htmlspecialchars($redirectUri); ?>">
                     <input type="hidden" name="state" value="<?php echo htmlspecialchars($state); ?>">
@@ -134,12 +166,12 @@ class AuthorizeController extends AppController
                     <input type="hidden" name="response_type" value="<?php echo htmlspecialchars($responseType); ?>">
 
                     <label>Username</label>
-                    <input type="text" name="username" required autofocus>
+                    <input type="text" name="username" placeholder="user@domain.com" required autofocus autocomplete="username">
 
                     <label>Password</label>
-                    <input type="password" name="password" required>
+                    <input type="password" name="password" placeholder="Password" required autocomplete="current-password">
 
-                    <button type="submit">Authorize</button>
+                    <button type="submit">Log In</button>
                 </form>
             </div>
         </body>
